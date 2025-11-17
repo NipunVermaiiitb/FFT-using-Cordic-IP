@@ -1,0 +1,75 @@
+module fourfft(
+    input  wire                   clk,
+    input  wire signed  [7:0]     pixel0,
+    input  wire signed  [7:0]     pixel1,
+    input  wire signed  [7:0]     pixel2,
+    input  wire signed  [7:0]     pixel3,
+    // complex outputs (real and imag parts)
+    output wire signed [9:0] fp0_re,
+    output wire signed [9:0] fp0_im,
+    output wire signed [9:0] fp1_re,
+    output wire signed [9:0] fp1_im,
+    output wire signed [9:0] fp2_re,
+    output wire signed [9:0] fp2_im,
+    output wire signed [9:0] fp3_re,
+    output wire signed [9:0] fp3_im
+);
+
+    // intermediate results from twofft (signed 9 bits)
+    wire signed [8:0] inter_even_sum; // pixel0 + pixel2
+    wire signed [8:0] inter_even_diff; // pixel0 - pixel2
+    wire signed [8:0] inter_odd_sum;  // pixel1 + pixel3
+    wire signed [8:0] inter_odd_diff; // pixel1 - pixel3
+
+    // instantiate twofft for even indices (0,2)
+    twofft be (
+        .pixel1(pixel0),
+        .pixel2(pixel2),
+        .fftpixel1(inter_even_sum),
+        .fftpixel2(inter_even_diff)
+    );
+
+    // instantiate twofft for odd indices (1,3)
+    twofft bo (
+        .pixel1(pixel1),
+        .pixel2(pixel3),
+        .fftpixel1(inter_odd_sum),
+        .fftpixel2(inter_odd_diff)
+    );
+
+    // Now combine:
+    // W4 = e^{-j*pi/2} = -j
+    // Treat intermediate values as complex with imag=0.
+    // E0 = inter_even_sum + j*0
+    // E1 = inter_even_diff + j*0
+    // O0 = inter_odd_sum + j*0
+    // O1 = inter_odd_diff + j*0
+    //
+    // X0 = E0 + O0
+    // X2 = E0 - O0
+    // X1 = E1 + W4 * O1 = E1 + (-j)*O1 = (E1_re + 0) + j( - O1 )
+    // X3 = E1 - W4 * O1 = E1 - (-j)*O1 = (E1_re + 0) + j( + O1 )
+
+    // widen to 10 bits for sums/diffs
+    wire signed [9:0] E0_re = {inter_even_sum[8], inter_even_sum}; // sign extend to 10
+    wire signed [9:0] E1_re = {inter_even_diff[8], inter_even_diff};
+    wire signed [9:0] O0_re = {inter_odd_sum[8], inter_odd_sum};
+    wire signed [9:0] O1_re = {inter_odd_diff[8], inter_odd_diff};
+
+    // X0 = E0 + O0
+    assign fp0_re = E0_re + O0_re;
+    assign fp0_im = 10'sd0;
+
+    // X2 = E0 - O0
+    assign fp2_re = E0_re - O0_re;
+    assign fp2_im = 10'sd0;
+
+    // X1 = E1 + W4*O1 = E1_re + j*(-O1_re)
+    assign fp1_re = E1_re;
+    assign fp1_im = - O1_re;
+
+    // X3 = E1 - W4*O1 = E1_re + j*(+O1_re)
+    assign fp3_re = E1_re;
+    assign fp3_im = O1_re;
+
+endmodule
