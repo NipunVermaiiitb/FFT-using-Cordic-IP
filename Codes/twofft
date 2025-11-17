@@ -1,0 +1,11 @@
+module twofft(
+    input  signed [7:0] pixel1,
+    input  signed [7:0] pixel2,
+    output signed [8:0] fftpixel1,
+    output signed [8:0] fftpixel2
+);
+
+    assign fftpixel1 = pixel1 + pixel2;
+    assign fftpixel2 = pixel1 - pixel2;
+
+endmodule
