@@ -1,0 +1,154 @@
+module fft8 (
+    input  wire clk,
+    input  wire signed [7:0]  x0,
+    input  wire signed [7:0]  x1,
+    input  wire signed [7:0]  x2,
+    input  wire signed [7:0]  x3,
+    input  wire signed [7:0]  x4,
+    input  wire signed [7:0]  x5,
+    input  wire signed [7:0]  x6,
+    input  wire signed [7:0]  x7,
+
+    output wire signed [11:0] X0_re, X0_im,
+    output wire signed [11:0] X1_re, X1_im,
+    output wire signed [11:0] X2_re, X2_im,
+    output wire signed [11:0] X3_re, X3_im,
+    output wire signed [11:0] X4_re, X4_im,
+    output wire signed [11:0] X5_re, X5_im,
+    output wire signed [11:0] X6_re, X6_im,
+    output wire signed [11:0] X7_re, X7_im
+);
+
+    //------------------------------------------
+    // Stage 1: Split even / odd and run 4-point FFTs
+    //------------------------------------------
+    wire signed [9:0] E0_re, E0_im;
+    wire signed [9:0] E1_re, E1_im;
+    wire signed [9:0] E2_re, E2_im;
+    wire signed [9:0] E3_re, E3_im;
+
+    fourfft FFT_even (
+        .clk(clk),
+        .pixel0(x0), .pixel1(x2), .pixel2(x4), .pixel3(x6),
+        .fpixel0_re(E0_re), .fpixel0_im(E0_im),
+        .fpixel1_re(E1_re), .fpixel1_im(E1_im),
+        .fpixel2_re(E2_re), .fpixel2_im(E2_im),
+        .fpixel3_re(E3_re), .fpixel3_im(E3_im)
+    );
+
+    wire signed [9:0] O0_re, O0_im;
+    wire signed [9:0] O1_re, O1_im;
+    wire signed [9:0] O2_re, O2_im;
+    wire signed [9:0] O3_re, O3_im;
+
+    fourfft FFT_odd (
+        .clk(clk),
+        .pixel0(x1), .pixel1(x3), .pixel2(x5), .pixel3(x7),
+        .fpixel0_re(O0_re), .fpixel0_im(O0_im),
+        .fpixel1_re(O1_re), .fpixel1_im(O1_im),
+        .fpixel2_re(O2_re), .fpixel2_im(O2_im),
+        .fpixel3_re(O3_re), .fpixel3_im(O3_im)
+    );
+
+    //------------------------------------------
+    // Stage 2: Twiddle multiplication for odd branch
+    // Using CORDIC to compute W8^k = e^{-jπk/4}
+    //------------------------------------------
+
+    // ANGLE ENCODING FOR CORDIC:
+    // phase input format (example Q1.7):
+    localparam signed [7:0] W8_1_PHASE = 8'd32;   // -π/4
+    localparam signed [7:0] W8_3_PHASE = 8'd96;   // -3π/4
+
+    // Twiddle results (CORDIC outputs cos & sin)
+    wire [15:0] W8_1_tdata;
+    wire [15:0] W8_3_tdata;
+
+    //------------------------------------------
+    // CORDIC for W8^1
+    //------------------------------------------
+    cordic_0 tw1 (
+        .aclk(clk),
+        .s_axis_phase_tvalid(1'b1),
+        .s_axis_phase_tdata(W8_1_PHASE),
+        .s_axis_cartesian_tvalid(1'b0),
+        .s_axis_cartesian_tdata(16'd0),
+        .m_axis_dout_tvalid(),
+        .m_axis_dout_tdata(W8_1_tdata)
+    );
+
+    //------------------------------------------
+    // CORDIC for W8^3
+    //------------------------------------------
+    cordic_0 tw3 (
+        .aclk(clk),
+        .s_axis_phase_tvalid(1'b1),
+        .s_axis_phase_tdata(W8_3_PHASE),
+        .s_axis_cartesian_tvalid(1'b0),
+        .s_axis_cartesian_tdata(16'd0),
+        .m_axis_dout_tvalid(),
+        .m_axis_dout_tdata(W8_3_tdata)
+    );
+
+    // Break into cos/sin
+    wire signed [7:0] W8_1_cos = W8_1_tdata[7:0];
+    wire signed [7:0] W8_1_sin = W8_1_tdata[15:8];
+
+    wire signed [7:0] W8_3_cos = W8_3_tdata[7:0];
+    wire signed [7:0] W8_3_sin = W8_3_tdata[15:8];
+
+    //------------------------------------------
+    // Complex multiply odd 4 outputs by twiddle
+    //------------------------------------------
+
+    function signed [11:0] cmult_re;
+        input signed [9:0] xr, xi;
+        input signed [7:0] cr, ci;
+        cmult_re = (xr*cr - xi*ci) >>> 7;
+    endfunction
+
+    function signed [11:0] cmult_im;
+        input signed [9:0] xr, xi;
+        input signed [7:0] cr, ci;
+        cmult_im = (xr*ci + xi*cr) >>> 7;
+    endfunction
+
+    // Twiddled odd outputs:
+    wire signed [11:0] T1_re = cmult_re(O1_re, O1_im, W8_1_cos, W8_1_sin);
+    wire signed [11:0] T1_im = cmult_im(O1_re, O1_im, W8_1_cos, W8_1_sin);
+
+    wire signed [11:0] T2_re = cmult_re(O2_re, O2_im, 0, -127); // W8^2 = -j
+    wire signed [11:0] T2_im = cmult_im(O2_re, O2_im, 0, -127);
+
+    wire signed [11:0] T3_re = cmult_re(O3_re, O3_im, W8_3_cos, W8_3_sin);
+    wire signed [11:0] T3_im = cmult_im(O3_re, O3_im, W8_3_cos, W8_3_sin);
+
+    //------------------------------------------
+    // Stage 3: Final butterflies
+    //------------------------------------------
+
+    assign X0_re = E0_re + O0_re;
+    assign X0_im = E0_im + O0_im;
+
+    assign X4_re = E0_re - O0_re;
+    assign X4_im = E0_im - O0_im;
+
+    assign X1_re = E1_re + T1_re;
+    assign X1_im = E1_im + T1_im;
+
+    assign X5_re = E1_re - T1_re;
+    assign X5_im = E1_im - T1_im;
+
+    assign X2_re = E2_re + T2_re;
+    assign X2_im = E2_im + T2_im;
+
+    assign X6_re = E2_re - T2_re;
+    assign X6_im = E2_im - T2_im;
+
+    assign X3_re = E3_re + T3_re;
+    assign X3_im = E3_im + T3_im;
+
+    assign X7_re = E3_re - T3_re;
+    assign X7_im = E3_im - T3_im;
+
+endmodule
