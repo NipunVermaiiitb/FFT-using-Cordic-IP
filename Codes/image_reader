@@ -1,0 +1,29 @@
+module image_reader(
+    input         clk,
+    input data_asked,
+    output reg [7:0]  pixel,
+    output reg pixel_fetched
+);
+    reg [14:0] address=0;
+    reg [6:0] row=0;
+    reg[7:0] column=0;
+    always@(posedge clk &data_asked) begin
+        pixel<=bram_data;
+        pixel_fetched<=1'b1;
+        address<=row*8 + column;
+        if(column<7) begin
+        column<=column+1;
+        end
+        else begin
+        column<=0;
+        row<=row+1;
+        end
+        end
+    blk_mem_gen_0 img_bram (
+        .clka(clk),
+        .ena(1'b1),
+        .addra(address),
+        .douta(bram_data)
+    );
+
+endmodule
