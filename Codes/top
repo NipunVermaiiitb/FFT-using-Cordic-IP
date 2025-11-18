@@ -1,0 +1,67 @@
+module top(
+    input clk
+    );
+    reg fft_done=1;
+    wire [7:0] p;
+    wire pixelflag;
+    image_reader img(
+    .clk(clk),
+    .data_asked(data_needed),
+    .pixel(p),
+    .pixel_fetched(pixelflag)
+    );
+    //What we will do is we will take 8pixels at once send them to fft module. Get the output and store it in bram(column wise so i take out row wise only again)
+    // and repeat it. So an always block on the top. The flow goes as - (Read 8 pixels -> 8pt fft -> store in bram2 column wise) X 8 times.
+    // Now Read 8pixels from the bram2 row wise -> 8point fft -> store in bram2 column wise. 
+    // So overall storing is always column wise and reading is always row wise.
+    //Declaring pixels
+    reg signed [7:0] [7:0]  x;
+    reg data_needed=1;
+    integer i=0;
+    //Now assigning these 8 pixels
+    always@(posedge clk & data_needed & pixelflag) begin
+         if(i<8) begin //This captures 8 pixels every clock cycle when we need data
+            i<=i+1;
+            x[i]<=p;
+         end
+         else begin
+         i<=0;
+         data_needed<=0;
+         end
+    end
+    
+    
+    reg signed [7:0] [11:0] X_re;
+    reg signed [7:0] [11:0] X_im;
+    
+    //Now sending this data fo fft
+    eightfft fft(
+    .clk(clk),
+    .x0(x[0]),
+    .x1(x[1]),
+    .x2(x[2]),
+    .x3(x[3]),
+    .x4(x[4]),
+    .x5(x[5]),
+    .x6(x[6]),
+    .x7(x[7]),
+    .X0_re(X_re[0]),
+    .X0_im(X_im[0]),
+    .X1_re(X_re[1]),
+    .X1_im(X_im[1]),
+    .X2_re(X_re[2]),
+    .X2_im(X_im[2]),
+    .X3_re(X_re[3]),
+    .X3_im(X_im[3]),
+    .X4_re(X_re[4]),
+    .X4_im(X_im[4]),
+    .X5_re(X_re[5]),
+    .X5_im(X_im[5]),   
+    .X6_re(X_re[6]),
+    .X6_im(X_im[6]),
+    .X7_re(X_re[7]),
+    .X7_im(X_im[7]) 
+    );
+    
+    
+endmodule
