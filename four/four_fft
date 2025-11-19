@@ -1,0 +1,134 @@
+module fft4_cordic #(
+    parameter WIDTH = 16
+)(
+    input  wire                 clk,
+    input  wire                 rst,
+    input  wire                 valid_in,
+
+    input  wire signed [WIDTH-1:0] xr0, xi0,
+    input  wire signed [WIDTH-1:0] xr1, xi1,
+    input  wire signed [WIDTH-1:0] xr2, xi2,
+    input  wire signed [WIDTH-1:0] xr3, xi3,
+
+    output reg                  valid_out,
+    output reg signed [WIDTH-1:0] yr0, yi0,
+    output reg signed [WIDTH-1:0] yr1, yi1,
+    output reg signed [WIDTH-1:0] yr2, yi2,
+    output reg signed [WIDTH-1:0] yr3, yi3
+);
+
+    // ------------------------------------------------------------
+    // CONSTANT: -90 degrees in 16-bit signed CORDIC phase format
+    // ------------------------------------------------------------
+    localparam signed [15:0] PHASE_NEG_90 = 16'shE000; // -8192 decimal
+
+    // ------------------------------------------------------------
+    // Stage 1 Butterfly (registered)
+    // ------------------------------------------------------------
+    reg signed [WIDTH:0] X0r, X0i;
+    reg signed [WIDTH:0] X1r, X1i;
+    reg signed [WIDTH:0] X2r, X2i;
+    reg signed [WIDTH:0] X3r, X3i;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            X0r <= 0; X0i <= 0;
+            X1r <= 0; X1i <= 0;
+            X2r <= 0; X2i <= 0;
+            X3r <= 0; X3i <= 0;
+        end else if (valid_in) begin
+            X0r <= xr0 + xr2;
+            X0i <= xi0 + xi2;
+
+            X1r <= xr1 + xr3;
+            X1i <= xi1 + xi3;
+
+            X2r <= xr0 - xr2;
+            X2i <= xi0 - xi2;
+
+            X3r <= xr1 - xr3;
+            X3i <= xi1 - xi3;
+        end
+    end
+
+    // ------------------------------------------------------------
+    // AXI-Stream signals for the CORDIC (declare them)
+    // ------------------------------------------------------------
+    wire        s_axis_phase_tvalid;
+    wire [15:0] s_axis_phase_tdata;
+
+    wire        s_axis_cartesian_tvalid;
+    wire [31:0] s_axis_cartesian_tdata;
+
+    // We'll generate a 1-cycle delayed valid so the cartesian data (X3r/X3i)
+    // is stable at the time tvalid is asserted.
+    reg valid_in_d; // delayed valid
+    always @(posedge clk) begin
+        if (rst) valid_in_d <= 1'b0;
+        else     valid_in_d <= valid_in;
+    end
+
+    // Phase valid/data: align with cartesian valid (delayed)
+    assign s_axis_phase_tvalid = valid_in_d;
+    assign s_axis_phase_tdata  = PHASE_NEG_90;
+
+    // Cartesian valid/data: use delayed valid and the X3 registers (they are stable here)
+    // Note: build the 32-bit {re,im} word. Use the lower WIDTH bits of each reg.
+    assign s_axis_cartesian_tvalid = valid_in_d;
+    assign s_axis_cartesian_tdata  = { X3r[WIDTH-1:0], X3i[WIDTH-1:0] };
+
+    // ------------------------------------------------------------
+    // Instantiate the CORDIC IP (AXI-Stream interface)
+    // ------------------------------------------------------------
+    wire signed [31:0] cordic_out;
+    wire cordic_out_valid;
+
+    cordic_0 cordic_inst (
+        .aclk(clk),
+
+        .s_axis_phase_tvalid   (s_axis_phase_tvalid),
+        .s_axis_phase_tdata    (s_axis_phase_tdata),
+
+        .s_axis_cartesian_tvalid(s_axis_cartesian_tvalid),
+        .s_axis_cartesian_tdata (s_axis_cartesian_tdata),
+
+        .m_axis_dout_tvalid    (cordic_out_valid),
+        .m_axis_dout_tdata     (cordic_out)
+    );
+
+    // split cordic output (assumes {Re[15:0], Im[15:0]})
+    wire signed [WIDTH-1:0] jmr = cordic_out[31:16];
+    wire signed [WIDTH-1:0] jmi = cordic_out[15:0];
+
+    // ------------------------------------------------------------
+    // Stage 2 Butterfly
+    // Wait on cordic_out_valid to combine results
+    // ------------------------------------------------------------
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_out <= 0;
+            yr0 <= 0; yi0 <= 0;
+            yr1 <= 0; yi1 <= 0;
+            yr2 <= 0; yi2 <= 0;
+            yr3 <= 0; yi3 <= 0;
+        end else if (cordic_out_valid) begin
+            valid_out <= 1;
+
+            // Note: X0r etc are WIDTH+1 bits. Truncate/sign-extend as needed when assigning.
+            yr0 <= X0r[WIDTH-1:0] + X1r[WIDTH-1:0];
+            yi0 <= X0i[WIDTH-1:0] + X1i[WIDTH-1:0];
+
+            yr2 <= X0r[WIDTH-1:0] - X1r[WIDTH-1:0];
+            yi2 <= X0i[WIDTH-1:0] - X1i[WIDTH-1:0];
+
+            yr1 <= X2r[WIDTH-1:0] + jmr;
+            yi1 <= X2i[WIDTH-1:0] + jmi;
+
+            yr3 <= X2r[WIDTH-1:0] - jmr;
+            yi3 <= X2i[WIDTH-1:0] - jmi;
+        end else begin
+            valid_out <= 0;
+        end
+    end
+
+endmodule
