@@ -1,0 +1,109 @@
+`timescale 1ns/1ps
+
+module tb_fft4_cordic_fixed;
+
+    localparam CLK_PERIOD = 10;
+    localparam WIDTH = 16;
+
+    // ------------------------------
+    // Testbench signals
+    // ------------------------------
+    reg clk;
+    reg rst;
+    reg valid_in;
+
+    reg  signed [WIDTH-1:0] xr0, xi0;
+    reg  signed [WIDTH-1:0] xr1, xi1;
+    reg  signed [WIDTH-1:0] xr2, xi2;
+    reg  signed [WIDTH-1:0] xr3, xi3;
+
+    wire valid_out;
+    wire signed [WIDTH-1:0] yr0, yi0;
+    wire signed [WIDTH-1:0] yr1, yi1;
+    wire signed [WIDTH-1:0] yr2, yi2;
+    wire signed [WIDTH-1:0] yr3, yi3;
+
+    // ------------------------------
+    // DUT instantiation
+    // ------------------------------
+    fft4_cordic dut (
+        .clk(clk),
+        .rst(rst),
+        .valid_in(valid_in),
+
+        .xr0(xr0), .xi0(xi0),
+        .xr1(xr1), .xi1(xi1),
+        .xr2(xr2), .xi2(xi2),
+        .xr3(xr3), .xi3(xi3),
+
+        .valid_out(valid_out),
+        .yr0(yr0), .yi0(yi0),
+        .yr1(yr1), .yi1(yi1),
+        .yr2(yr2), .yi2(yi2),
+        .yr3(yr3), .yi3(yi3)
+    );
+
+    // ------------------------------
+    // Clock generation (100 MHz)
+    // ------------------------------
+    initial begin
+        clk = 0;
+        forever #(CLK_PERIOD/2) clk = ~clk;
+    end
+
+    // ------------------------------
+    // MAIN TEST PROCESS
+    // ------------------------------
+    initial begin
+        // Init
+        rst = 1;
+        valid_in = 0;
+
+        xr0 = 0; xi0 = 0;
+        xr1 = 0; xi1 = 0;
+        xr2 = 0; xi2 = 0;
+        xr3 = 0; xi3 = 0;
+
+        $display("TB: Reset asserted...");
+        repeat(5) @(posedge clk);
+        rst = 0;
+        $display("TB: Reset deasserted...");
+
+        repeat(5) @(posedge clk);
+
+        // ---------------------------------------------------------
+        // Test vector: impulse
+        // FFT(1,0,0,0) = (1,1,1,1)
+        // ---------------------------------------------------------
+        $display("\nTB: Applying FFT input: [1,0,0,0]");
+        xr0 <= 16'sd1; xi0 <= 0;
+        xr1 <= 16'sd0; xi1 <= 0;
+        xr2 <= 16'sd0; xi2 <= 0;
+        xr3 <= 16'sd0; xi3 <= 0;
+
+        @(posedge clk);
+        valid_in <= 1;
+
+        @(posedge clk);
+        valid_in <= 0;
+
+        // ---------------------------------------------------------
+        // Wait for output
+        // ---------------------------------------------------------
+        $display("TB: Waiting for FFT result...");
+
+        wait(valid_out == 1);
+
+        $display("TB: FFT Output:");
+        $display("   Y0 = %d + j%d", yr0, yi0);
+        $display("   Y1 = %d + j%d", yr1, yi1);
+        $display("   Y2 = %d + j%d", yr2, yi2);
+        $display("   Y3 = %d + j%d", yr3, yi3);
+
+        repeat(10) @(posedge clk);
+
+        $display("TB: Simulation complete.");
+        $finish;
+    end
+
+endmodule
