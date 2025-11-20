@@ -4,6 +4,10 @@ module top(
     output reg  fft_done
 );
 
+
+
+
+
 // -----------------------------------------------------
 // STATE MACHINE
 // -----------------------------------------------------
@@ -48,6 +52,13 @@ wire signed [11:0] X_re [0:7];
 wire signed [11:0] X_im [0:7];
 wire fft_valid;
 
+
+ila_0 your_instance_name (
+	.clk(clk), // input wire clk
+
+
+	.probe0(fft_done) // input wire [0:0] probe0
+);
 // -----------------------------------------------------
 // MEMORIES
 // -----------------------------------------------------
