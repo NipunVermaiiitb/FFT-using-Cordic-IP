@@ -1,6 +1,6 @@
 module fft8 (
     input  wire clk,
-    input  wire start,                 // <-- new: one-cycle start pulse
+    input  wire start,      // <-- one-cycle start pulse from top module
 
     // 8 real inputs
     input  wire signed [7:0] x0,
@@ -25,188 +25,165 @@ module fft8 (
     output wire fft_valid
 );
 
-//==========================================
-// Input staging: latch inputs on `start`
-//==========================================
-reg signed [7:0] xr_reg0, xr_reg1, xr_reg2, xr_reg3;
-reg signed [7:0] xr_reg4, xr_reg5, xr_reg6, xr_reg7;
-
-reg started; // internal flag indicates we captured inputs and are waiting for results
+//==============================================================
+// 1) INPUT LATCHING ON START
+//==============================================================
+reg signed [7:0] xr0, xr1, xr2, xr3, xr4, xr5, xr6, xr7;
+reg started;
 
 always @(posedge clk) begin
     if (start) begin
-        // capture inputs into internal registers on start
-        xr_reg0 <= x0;
-        xr_reg1 <= x1;
-        xr_reg2 <= x2;
-        xr_reg3 <= x3;
-        xr_reg4 <= x4;
-        xr_reg5 <= x5;
-        xr_reg6 <= x6;
-        xr_reg7 <= x7;
+        xr0 <= x0;
+        xr1 <= x1;
+        xr2 <= x2;
+        xr3 <= x3;
+        xr4 <= x4;
+        xr5 <= x5;
+        xr6 <= x6;
+        xr7 <= x7;
         started <= 1'b1;
-    end
-    else begin
-        // clear `started` later when results are valid (see below)
-        // keep started until fft_valid asserted
+    end else begin
+        // cleared when fft_valid fires
     end
 end
 
-//==========================================
-// Stage 1: 4-point FFT Even/Odd Split
-// Use latched inputs xr_reg* so fft sees stable inputs.
-//==========================================
+//==============================================================
+// 2) COMBINATIONAL 4-POINT FFTS
+//    Your fourfft has ZERO pipeline latency.
+//==============================================================
 wire signed [9:0] E0_re, E0_im, E1_re, E1_im, E2_re, E2_im, E3_re, E3_im;
+wire signed [9:0] O0_re, O0_im, O1_re, O1_im, O2_re, O2_im, O3_re, O3_im;
 
 fourfft FFT_even (
     .clk(clk),
-    .pixel0(xr_reg0), .pixel1(xr_reg2), .pixel2(xr_reg4), .pixel3(xr_reg6),
+    .pixel0(xr0), .pixel1(xr2), .pixel2(xr4), .pixel3(xr6),
     .fp0_re(E0_re), .fp0_im(E0_im),
     .fp1_re(E1_re), .fp1_im(E1_im),
     .fp2_re(E2_re), .fp2_im(E2_im),
     .fp3_re(E3_re), .fp3_im(E3_im)
 );
 
-wire signed [9:0] O0_re, O0_im, O1_re, O1_im, O2_re, O2_im, O3_re, O3_im;
-
 fourfft FFT_odd (
     .clk(clk),
-    .pixel0(xr_reg1), .pixel1(xr_reg3), .pixel2(xr_reg5), .pixel3(xr_reg7),
+    .pixel0(xr1), .pixel1(xr3), .pixel2(xr5), .pixel3(xr7),
     .fp0_re(O0_re), .fp0_im(O0_im),
     .fp1_re(O1_re), .fp1_im(O1_im),
     .fp2_re(O2_re), .fp2_im(O2_im),
     .fp3_re(O3_re), .fp3_im(O3_im)
 );
 
-//==========================================
-// Stage 2: Twiddle Factors From CORDIC
-//==========================================
-// Exact π-based fixed-point encoding
+//==============================================================
+// 3) CORDIC TWIDDLE FACTORS
+//==============================================================
 localparam signed [15:0] W8_1_PHASE = -16'sd8192;   // -π/4
 localparam signed [15:0] W8_3_PHASE = -16'sd24576;  // -3π/4
 
-wire phase_valid = 1'b1;
-
-wire [31:0] W8_1_tdata_full;
-wire [31:0] W8_3_tdata_full;
-
-wire W8_1_valid;
-wire W8_3_valid;
+wire [31:0] W8_1_dout, W8_3_dout;
+wire W8_1_valid, W8_3_valid;
 
 cordic_0 cordic_w1 (
     .aclk(clk),
-    .s_axis_phase_tvalid(phase_valid),
+    .s_axis_phase_tvalid(1'b1),
     .s_axis_phase_tdata(W8_1_PHASE),
     .m_axis_dout_tvalid(W8_1_valid),
-    .m_axis_dout_tdata(W8_1_tdata_full)
+    .m_axis_dout_tdata(W8_1_dout)
 );
 
 cordic_0 cordic_w3 (
     .aclk(clk),
-    .s_axis_phase_tvalid(phase_valid),
+    .s_axis_phase_tvalid(1'b1),
     .s_axis_phase_tdata(W8_3_PHASE),
     .m_axis_dout_tvalid(W8_3_valid),
-    .m_axis_dout_tdata(W8_3_tdata_full)
+    .m_axis_dout_tdata(W8_3_dout)
 );
 
-// Extract 16-bit Q1.15 cos/sin
-wire signed [15:0] W8_1_cos = W8_1_tdata_full[31:16];
-wire signed [15:0] W8_1_sin = W8_1_tdata_full[15:0];
+wire signed [15:0] W8_1_cos = W8_1_dout[31:16];
+wire signed [15:0] W8_1_sin = W8_1_dout[15:0];
 
-wire signed [15:0] W8_3_cos = W8_3_tdata_full[31:16];
-wire signed [15:0] W8_3_sin = W8_3_tdata_full[15:0];
+wire signed [15:0] W8_3_cos = W8_3_dout[31:16];
+wire signed [15:0] W8_3_sin = W8_3_dout[15:0];
 
-//==========================================
-// FFT VALID: require CORDIC valid and that we previously started.
-// When fft_valid is observed, clear `started` to accept next start.
-//==========================================
-reg fft_valid_r;
-assign fft_valid = fft_valid_r;
-
-always @(posedge clk) begin
-    // default: keep fft_valid low
-    fft_valid_r <= 1'b0;
-
-    // If we had started and both CORDICs are valid, assert fft_valid for one cycle.
-    if (started && W8_1_valid && W8_3_valid) begin
-        fft_valid_r <= 1'b1;
-        // clear started to allow next operation (one-cycle pulse)
-        started <= 1'b0;
-    end
-end
-
-//==========================================
-// Complex multiply using 16-bit twiddles (Q1.15)
-//==========================================
+//==============================================================
+// 4) COMPLEX MULTIPLY
+//==============================================================
 function signed [11:0] cmult_re;
     input signed [9:0] xr, xi;
     input signed [15:0] wr, wi;
     reg signed [31:0] p1, p2;
-    begin
-        p1 = xr * wr;
-        p2 = xi * wi;
-        cmult_re = (p1 - p2) >>> 15;
-    end
-endfunction
+begin
+    p1 = xr * wr;
+    p2 = xi * wi;
+    cmult_re = (p1 - p2) >>> 15;
+end endfunction
 
 function signed [11:0] cmult_im;
     input signed [9:0] xr, xi;
     input signed [15:0] wr, wi;
     reg signed [31:0] p1, p2;
-    begin
-        p1 = xr * wi;
-        p2 = xi * wr;
-        cmult_im = (p1 + p2) >>> 15;
-    end
-endfunction
+begin
+    p1 = xr * wi;
+    p2 = xi * wr;
+    cmult_im = (p1 + p2) >>> 15;
+end endfunction
 
-//==========================================
-// Twiddle Multiplications
-//==========================================
-wire signed [11:0] T0_re = {{2{O0_re[9]}}, O0_re};   // W^0 = 1
+//==============================================================
+// 5) STAGE 2 TWIDDLE APPLICATION
+//==============================================================
+wire signed [11:0] T0_re = {{2{O0_re[9]}}, O0_re}; 
 wire signed [11:0] T0_im = {{2{O0_im[9]}}, O0_im};
 
 wire signed [11:0] T1_re = cmult_re(O1_re, O1_im, W8_1_cos, W8_1_sin);
 wire signed [11:0] T1_im = cmult_im(O1_re, O1_im, W8_1_cos, W8_1_sin);
 
-// W^2 = -j
-wire signed [11:0] T2_re = {{2{O2_im[9]}}, O2_im};
+wire signed [11:0] T2_re = {{2{O2_im[9]}}, O2_im}; 
 wire signed [11:0] T2_im = -{{2{O2_re[9]}}, O2_re};
 
 wire signed [11:0] T3_re = cmult_re(O3_re, O3_im, W8_3_cos, W8_3_sin);
 wire signed [11:0] T3_im = cmult_im(O3_re, O3_im, W8_3_cos, W8_3_sin);
 
-//==========================================
-// Extend Even to 12 bits
-//==========================================
-wire signed [11:0] E0_re_ext = {{2{E0_re[9]}}, E0_re};
-wire signed [11:0] E0_im_ext = {{2{E0_im[9]}}, E0_im};
-wire signed [11:0] E1_re_ext = {{2{E1_re[9]}}, E1_re};
-wire signed [11:0] E1_im_ext = {{2{E1_im[9]}}, E1_im};
-wire signed [11:0] E2_re_ext = {{2{E2_re[9]}}, E2_re};
-wire signed [11:0] E2_im_ext = {{2{E2_im[9]}}, E2_im};
-wire signed [11:0] E3_re_ext = {{2{E3_re[9]}}, E3_re};
-wire signed [11:0] E3_im_ext = {{2{E3_im[9]}}, E3_im};
+// Even terms sign-extended
+wire signed [11:0] E0_rex = {{2{E0_re[9]}}, E0_re};
+wire signed [11:0] E0_imx = {{2{E0_im[9]}}, E0_im};
+wire signed [11:0] E1_rex = {{2{E1_re[9]}}, E1_re};
+wire signed [11:0] E1_imx = {{2{E1_im[9]}}, E1_im};
+wire signed [11:0] E2_rex = {{2{E2_re[9]}}, E2_re};
+wire signed [11:0] E2_imx = {{2{E2_im[9]}}, E2_im};
+wire signed [11:0] E3_rex = {{2{E3_re[9]}}, E3_re};
+wire signed [11:0] E3_imx = {{2{E3_im[9]}}, E3_im};
 
-//==========================================
-// Final FFT Outputs
-//==========================================
-assign X0_re = E0_re_ext + T0_re;
-assign X0_im = E0_im_ext + T0_im;
-assign X1_re = E1_re_ext + T1_re;
-assign X1_im = E1_im_ext + T1_im;
-assign X2_re = E2_re_ext + T2_re;
-assign X2_im = E2_im_ext + T2_im;
-assign X3_re = E3_re_ext + T3_re;
-assign X3_im = E3_im_ext + T3_im;
+//==============================================================
+// 6) FINAL OUTPUTS
+//==============================================================
+assign X0_re = E0_rex + T0_re;
+assign X0_im = E0_imx + T0_im;
+assign X1_re = E1_rex + T1_re;
+assign X1_im = E1_imx + T1_im;
+assign X2_re = E2_rex + T2_re;
+assign X2_im = E2_imx + T2_im;
+assign X3_re = E3_rex + T3_re;
+assign X3_im = E3_imx + T3_im;
 
-assign X4_re = E0_re_ext - T0_re;
-assign X4_im = E0_im_ext - T0_im;
-assign X5_re = E1_re_ext - T1_re;
-assign X5_im = E1_im_ext - T1_im;
-assign X6_re = E2_re_ext - T2_re;
-assign X6_im = E2_im_ext - T2_im;
-assign X7_re = E3_re_ext - T3_re;
-assign X7_im = E3_im_ext - T3_im;
+assign X4_re = E0_rex - T0_re;
+assign X4_im = E0_imx - T0_im;
+assign X5_re = E1_rex - T1_re;
+assign X5_im = E1_imx - T1_im;
+assign X6_re = E2_rex - T2_re;
+assign X6_im = E2_imx - T2_im;
+assign X7_re = E3_rex - T3_re;
+assign X7_im = E3_imx - T3_im;
+
+//==============================================================
+// 7) VALID HANDSHAKE — one-cycle pulse
+//==============================================================
+reg fft_valid_r;
+assign fft_valid = fft_valid_r;
+
+always @(posedge clk) begin
+    fft_valid_r <= 1'b0;
+    if (started && W8_1_valid && W8_3_valid) begin
+        fft_valid_r <= 1'b1;
+        started <= 1'b0;
+    end
+end
 
 endmodule
