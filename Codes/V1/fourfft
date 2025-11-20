@@ -1,0 +1,97 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 19.11.2025 15:12:41
+// Design Name: 
+// Module Name: fourfft
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module fourfft(
+    input  wire clk,  // Not used in combinational version, but kept for consistency
+    input  wire signed [7:0] pixel0,
+    input  wire signed [7:0] pixel1,
+    input  wire signed [7:0] pixel2,
+    input  wire signed [7:0] pixel3,
+    // Complex outputs (real and imaginary parts)
+    output wire signed [9:0] fp0_re,
+    output wire signed [9:0] fp0_im,
+    output wire signed [9:0] fp1_re,
+    output wire signed [9:0] fp1_im,
+    output wire signed [9:0] fp2_re,
+    output wire signed [9:0] fp2_im,
+    output wire signed [9:0] fp3_re,
+    output wire signed [9:0] fp3_im
+);
+
+    // Intermediate results from twofft (signed 9 bits)
+    wire signed [8:0] inter_even_sum;  // pixel0 + pixel2
+    wire signed [8:0] inter_even_diff; // pixel0 - pixel2
+    wire signed [8:0] inter_odd_sum;   // pixel1 + pixel3
+    wire signed [8:0] inter_odd_diff;  // pixel1 - pixel3
+
+    // Instantiate twofft for even indices (0,2)
+    twofft even_fft (
+        .pixel1(pixel0),
+        .pixel2(pixel2),
+        .fftpixel1(inter_even_sum),
+        .fftpixel2(inter_even_diff)
+    );
+
+    // Instantiate twofft for odd indices (1,3)
+    twofft odd_fft (
+        .pixel1(pixel1),
+        .pixel2(pixel3),
+        .fftpixel1(inter_odd_sum),
+        .fftpixel2(inter_odd_diff)
+    );
+
+    // Radix-2 decimation-in-time FFT butterfly
+    // W4^0 = 1,  W4^1 = -j,  W4^2 = -1,  W4^3 = j
+    //
+    // E0 = inter_even_sum,  E1 = inter_even_diff
+    // O0 = inter_odd_sum,   O1 = inter_odd_diff
+    //
+    // X[k] = E[k] + W4^k * O[k]
+    //
+    // X0 = E0 + W4^0 * O0 = E0 + O0
+    // X1 = E1 + W4^1 * O1 = E1 + (-j) * O1 = E1 + j*(-O1)
+    // X2 = E0 + W4^2 * O0 = E0 - O0
+    // X3 = E1 + W4^3 * O1 = E1 + j * O1
+
+    // Sign extend to 10 bits for addition/subtraction
+    wire signed [9:0] E0_re = {{1{inter_even_sum[8]}}, inter_even_sum};
+    wire signed [9:0] E1_re = {{1{inter_even_diff[8]}}, inter_even_diff};
+    wire signed [9:0] O0_re = {{1{inter_odd_sum[8]}}, inter_odd_sum};
+    wire signed [9:0] O1_re = {{1{inter_odd_diff[8]}}, inter_odd_diff};
+
+    // X0 = E0 + O0 (real only, imag = 0)
+    assign fp0_re = E0_re + O0_re;
+    assign fp0_im = 10'sd0;
+
+    // X1 = E1 + (-j)*O1 = E1 + j*(-O1)
+    assign fp1_re = E1_re;
+    assign fp1_im = -O1_re;
+
+    // X2 = E0 - O0 (real only, imag = 0)
+    assign fp2_re = E0_re - O0_re;
+    assign fp2_im = 10'sd0;
+
+    // X3 = E1 + j*O1
+    assign fp3_re = E1_re;
+    assign fp3_im = O1_re;
+
+endmodule
