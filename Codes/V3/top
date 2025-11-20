@@ -1,0 +1,379 @@
+module top_safe(
+    input  wire clk,
+    input  wire rst_n,
+    output reg  fft_done
+);
+
+// -----------------------------------------------------
+// STATE MACHINE (same states plus two extra for safe start)
+// -----------------------------------------------------
+parameter S_IDLE           = 6'd0;
+parameter S_READ_ROW       = 6'd1;
+parameter S_LOAD_FFT_INPUT = 6'd2; // NEW: copy x_feed -> x_fft and pulse fft_start
+parameter S_START_FFT_ROW  = 6'd3; // existing: moved after load
+parameter S_WAIT_FFT_ROW   = 6'd4;
+parameter S_STORE_ROW      = 6'd5;
+parameter S_NEXT_ROW       = 6'd6;
+
+parameter S_START_COL_LOOP = 6'd7;
+parameter S_READ_COL_REAL  = 6'd8;
+parameter S_START_FFT_COLR = 6'd9;
+parameter S_WAIT_FFT_COLR  = 6'd10;
+parameter S_CAPTURE_FR     = 6'd11;
+
+parameter S_READ_COL_IMAG  = 6'd12;
+parameter S_LOAD_FFT_COLI  = 6'd13; // NEW: copy x_feed -> x_fft and pulse fft_start
+parameter S_START_FFT_COLI = 6'd14;
+parameter S_WAIT_FFT_COLI  = 6'd15;
+parameter S_CAPTURE_FI     = 6'd16;
+
+parameter S_COMBINE_WRITE  = 6'd17;
+parameter S_NEXT_COLUMN    = 6'd18;
+parameter S_DONE           = 6'd19;
+
+// -----------------------------------------------------
+reg [5:0] state, next_state;
+
+reg [2:0] row_idx, col_idx;
+reg [2:0] row_read_count, row_store_count;
+reg [2:0] col_read_count, col_store_count;
+
+reg data_needed;
+wire [7:0] pixel;
+wire pixel_fetched;
+
+// -----------------------------------------------------
+// FFT INPUT BUFFER (separation between feed and FFT inputs)
+// -----------------------------------------------------
+reg signed [7:0] x_feed [0:7]; // written while reading pixels / row_mem
+reg signed [7:0] x_fft  [0:7]; // stable inputs sampled and connected to fft8
+
+// FFT outputs
+wire signed [11:0] X_re [0:7];
+wire signed [11:0] X_im [0:7];
+wire fft_valid;
+
+// Start handshake to FFT and internal running flag
+reg fft_start;      // one-cycle pulse to start FFT
+reg fft_running;    // stays high while waiting for fft_valid
+
+// -----------------------------------------------------
+ila_0 your_instance_name (
+    .clk(clk),
+    .probe0(fft_done)
+);
+
+// -----------------------------------------------------
+// MEMORIES
+// -----------------------------------------------------
+reg signed [23:0] row_mem   [0:63];
+reg signed [23:0] final_mem [0:63];
+
+reg signed [11:0] Fr_re [0:7], Fr_im [0:7];
+reg signed [11:0] Fi_re [0:7], Fi_im [0:7];
+
+integer i;
+
+// -----------------------------------------------------
+// IMAGE READER
+// -----------------------------------------------------
+image_reader img (
+    .clk(clk),
+    .rst_n(rst_n),
+    .data_asked(data_needed),
+    .pixel(pixel),
+    .pixel_fetched(pixel_fetched)
+);
+
+// -----------------------------------------------------
+// FFT8 INSTANCE - assumed to have a 'start' input.
+// If your fft8 does NOT have a start input, adapt here: either
+//  - remove .start and drive fft_running with some other handshake,
+//  - or create a small adapter that latches x_fft on a start pulse.
+ // -----------------------------------------------------
+fft8 fft_inst (
+    .clk(clk),
+    .start(fft_start),    // <-- one-cycle start pulse; adapt if your IP doesn't have this
+    .x0(x_fft[0]), .x1(x_fft[1]), .x2(x_fft[2]), .x3(x_fft[3]),
+    .x4(x_fft[4]), .x5(x_fft[5]), .x6(x_fft[6]), .x7(x_fft[7]),
+
+    .X0_re(X_re[0]), .X0_im(X_im[0]),
+    .X1_re(X_re[1]), .X1_im(X_im[1]),
+    .X2_re(X_re[2]), .X2_im(X_im[2]),
+    .X3_re(X_re[3]), .X3_im(X_im[3]),
+    .X4_re(X_re[4]), .X4_im(X_im[4]),
+    .X5_re(X_re[5]), .X5_im(X_im[5]),
+    .X6_re(X_re[6]), .X6_im(X_im[6]),
+    .X7_re(X_re[7]), .X7_im(X_im[7]),
+
+    .fft_valid(fft_valid)
+);
+
+// -----------------------------------------------------
+// SEQUENTIAL FSM AND CONTROL
+// -----------------------------------------------------
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        state <= S_IDLE;
+        fft_done <= 1'b0;
+
+        row_idx <= 0; col_idx <= 0;
+        row_read_count <= 0; row_store_count <= 0;
+        col_read_count <= 0; col_store_count <= 0;
+
+        data_needed <= 1'b0;
+        fft_start <= 1'b0;
+        fft_running <= 1'b0;
+
+        // clear buffers
+        for (i = 0; i < 8; i=i+1) begin
+            x_feed[i] <= 0;
+            x_fft[i]  <= 0;
+            Fr_re[i] <= 0; Fr_im[i] <= 0;
+            Fi_re[i] <= 0; Fi_im[i] <= 0;
+        end
+        for (i = 0; i < 64; i=i+1) begin
+            row_mem[i] <= 0;
+            final_mem[i] <= 0;
+        end
+
+    end else begin
+        // default clear one-cycle signals
+        fft_start <= 1'b0;
+
+        // Manage fft_running: set when start asserted, clear when fft_valid asserted
+        if (fft_start)
+            fft_running <= 1'b1;
+        else if (fft_valid)
+            fft_running <= 1'b0;
+
+        state <= next_state;
+
+        case (state)
+
+        // ---------------------------
+        S_IDLE: begin
+            fft_done <= 1'b0;
+            data_needed <= 1'b1;
+            row_read_count <= 0;
+            row_idx <= 0;
+        end
+
+        // ---------------------------
+        // ROW READ / feed x_feed while not running FFT
+        S_READ_ROW: begin
+            // only request data when not waiting on FFT
+            data_needed <= 1'b1;
+            if (pixel_fetched) begin
+                // write into feed buffer only
+                if (!fft_running) begin
+                    x_feed[row_read_count] <= pixel;
+                    row_read_count <= (row_read_count == 3'd7) ? 0 :
+                                       row_read_count + 1'b1;
+                end
+            end
+        end
+
+        // NEW: copy x_feed -> x_fft and pulse start
+        S_LOAD_FFT_INPUT: begin
+            // copy all 8 entries into x_fft in one cycle (non-blocking)
+            for (i = 0; i < 8; i = i+1) begin
+                x_fft[i] <= x_feed[i];
+            end
+            // pulse fft_start for one cycle; fft_running will be set next cycle
+            fft_start <= 1'b1;
+            data_needed <= 1'b0;
+        end
+
+        S_START_FFT_ROW: begin
+            // nothing here - fft_running is true after start
+        end
+
+        S_WAIT_FFT_ROW: begin
+            // wait for fft_valid; don't touch x_feed/x_fft
+        end
+
+        S_STORE_ROW: begin
+            // store outputs; safe because fft_valid has been seen
+            row_mem[row_idx*8 + row_store_count] <=
+                {X_im[row_store_count], X_re[row_store_count]};
+            row_store_count <= (row_store_count == 3'd7) ? 0 :
+                                row_store_count + 1'b1;
+        end
+
+        S_NEXT_ROW: begin
+            row_idx <= (row_idx == 3'd7) ? 0 : row_idx + 1'b1;
+            row_read_count <= 0;
+            row_store_count <= 0;
+            data_needed <= 1'b1;
+        end
+
+        // ---------------------------
+        // COLUMN READ (REAL)
+        // ---------------------------
+        S_START_COL_LOOP: begin
+            col_idx <= 0;
+            col_read_count <= 0;
+            // make sure feed buffer can be reused
+            data_needed <= 1'b0;
+        end
+
+        S_READ_COL_REAL: begin
+            // Load feed buffer from row_mem real parts. Safe because fft_running must be false here.
+            // Downshift to avoid growth, as original design did.
+            x_feed[col_read_count] <= row_mem[col_read_count*8 + col_idx][11:0] >>> 4;
+            col_read_count <= (col_read_count == 3'd7) ? 0 :
+                               col_read_count + 1'b1;
+        end
+
+        S_START_FFT_COLR: begin
+            // nothing; start happens in S_LOAD_FFT_INPUT stage
+        end
+
+        S_WAIT_FFT_COLR: begin end
+
+        S_CAPTURE_FR: begin
+            for (i = 0; i < 8; i=i+1) begin
+                Fr_re[i] <= X_re[i];
+                Fr_im[i] <= X_im[i];
+            end
+        end
+
+        // ---------------------------
+        // COLUMN READ (IMAG)
+        // ---------------------------
+        S_READ_COL_IMAG: begin
+            x_feed[col_read_count] <= row_mem[col_read_count*8 + col_idx][23:12] >>> 4;
+            col_read_count <= (col_read_count == 3'd7) ? 0 :
+                               col_read_count + 1'b1;
+        end
+
+        S_LOAD_FFT_COLI: begin
+            // copy x_feed -> x_fft then start FFT for imag column
+            for (i = 0; i < 8; i = i+1) begin
+                x_fft[i] <= x_feed[i];
+            end
+            fft_start <= 1'b1;
+        end
+
+        S_START_FFT_COLI: begin end
+        S_WAIT_FFT_COLI: begin end
+
+        S_CAPTURE_FI: begin
+            for (i = 0; i < 8; i=i+1) begin
+                Fi_re[i] <= X_re[i];
+                Fi_im[i] <= X_im[i];
+            end
+            col_store_count <= 0;
+        end
+
+        // ---------------------------
+        // COMBINE REAL + IMAG FFT
+        // ---------------------------
+        S_COMBINE_WRITE: begin
+            final_mem[col_store_count*8 + col_idx] <= {
+               (Fr_im[col_store_count] + Fi_re[col_store_count]),
+               (Fr_re[col_store_count] - Fi_im[col_store_count])
+            };
+            col_store_count <= (col_store_count == 3'd7) ? 0 :
+                                col_store_count + 1'b1;
+        end
+
+        S_NEXT_COLUMN: begin
+            col_idx <= (col_idx == 3'd7) ? 0 :
+                       col_idx + 1'b1;
+        end
+
+        S_DONE: begin
+            fft_done <= 1'b1;
+        end
+
+        endcase
+    end
+end
+
+// -----------------------------------------------------
+// NEXT-STATE LOGIC (updated to include S_LOAD_FFT_INPUT and S_LOAD_FFT_COLI)
+// -----------------------------------------------------
+always @(*) begin
+    next_state = state;
+
+    case (state)
+
+    S_IDLE: next_state = S_READ_ROW;
+
+    S_READ_ROW:
+        if (row_read_count == 3'd7 && pixel_fetched)
+            next_state = S_LOAD_FFT_INPUT;
+
+    // New: after we have fed 8 samples into x_feed, move to load inputs and start FFT
+    S_LOAD_FFT_INPUT:
+        next_state = S_START_FFT_ROW;
+
+    S_START_FFT_ROW:
+        next_state = S_WAIT_FFT_ROW;
+
+    S_WAIT_FFT_ROW:
+        if (fft_valid) next_state = S_STORE_ROW;
+
+    S_STORE_ROW:
+        if (row_store_count == 3'd7)
+            next_state = (row_idx == 3'd7) ?
+                          S_START_COL_LOOP : S_NEXT_ROW;
+
+    S_NEXT_ROW:
+        next_state = S_READ_ROW;
+
+    // ---------------------------
+    // COLUMN LOOP
+    // ---------------------------
+    S_START_COL_LOOP:
+        next_state = S_READ_COL_REAL;
+
+    S_READ_COL_REAL:
+        if (col_read_count == 3'd7)
+            next_state = S_LOAD_FFT_INPUT; // reuse load stage for column real FFT
+
+    // reuse same sequence for column FFT real
+    S_START_FFT_COLR:
+        next_state = S_WAIT_FFT_COLR;
+
+    S_WAIT_FFT_COLR:
+        if (fft_valid) next_state = S_CAPTURE_FR;
+
+    S_CAPTURE_FR:
+        next_state = S_READ_COL_IMAG;
+
+    S_READ_COL_IMAG:
+        if (col_read_count == 3'd7)
+            next_state = S_LOAD_FFT_COLI;
+
+    S_LOAD_FFT_COLI:
+        next_state = S_START_FFT_COLI;
+
+    S_START_FFT_COLI:
+        next_state = S_WAIT_FFT_COLI;
+
+    S_WAIT_FFT_COLI:
+        if (fft_valid) next_state = S_CAPTURE_FI;
+
+    S_CAPTURE_FI:
+        next_state = S_COMBINE_WRITE;
+
+    // FIXED COMBINE_WRITE LOOP (write all 8 entries)
+    S_COMBINE_WRITE:
+        if (col_store_count == 3'd7)
+            next_state = S_NEXT_COLUMN;
+
+    // FIXED COLUMN END CHECK
+    S_NEXT_COLUMN:
+        next_state = (col_idx == 3'd7) ?
+                     S_DONE : S_READ_COL_REAL;
+
+    S_DONE:
+        next_state = S_DONE;
+
+    endcase
+end
+
+endmodule
